@@ -1,12 +1,15 @@
 version: '3.8'
 services:
   ohc-rosters-bot:
-    build: .
+    image: yourname/ohc-rosters-bot:latest
+    # For local dev without pushing, you can build from source:
+    # build: .
     container_name: ohc-rosters-bot
-    env_file: .env
     restart: always
-    # For production, omit the bind mount to keep the container immutable.
-    # For local dev with hot reload, you can uncomment the next two lines:
-    # volumes:
-    #   - .:/app
+    env_file: .env
+    volumes:
+      - ohc_rosters_data:/app/data
     command: ["npm", "start"]
+
+volumes:
+  ohc_rosters_data:
