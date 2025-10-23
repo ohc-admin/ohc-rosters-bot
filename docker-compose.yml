@@ -1,0 +1,10 @@
+version: '3.8'
+services:
+  ohc-rosters-bot:
+    container_name: ohc-rosters-bot
+    build: .
+    restart: always
+    env_file: .env
+    volumes:
+      - .:/app
+    command: ["npm", "start"]
