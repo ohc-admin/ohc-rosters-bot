@@ -1,19 +1,26 @@
-# Runtime-only image (no native toolchain needed)
-FROM node:20-bullseye-slim
-
+# ---------- Build stage (native modules friendly) ----------
+FROM node:20-bullseye AS build
 WORKDIR /app
 
-# Copy manifests first for better layer caching
-COPY package*.json ./
+RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
 
-# Install prod deps
+COPY package*.json ./
 RUN npm ci --omit=dev || npm install --production
 
-# Copy the app
+# Ensure native deps are built correctly (for better-sqlite3)
+ENV npm_config_build_from_source=true
+
 COPY . .
+RUN npm rebuild better-sqlite3 --build-from-source
+
+# ---------- Runtime stage ----------
+FROM node:20-bullseye-slim
+WORKDIR /app
+
+COPY --from=build /app /app
+
+# Ensure writable DB directory
+RUN mkdir -p /app/data
 
 ENV NODE_ENV=production
-# If your entry is src/index.js (GitHub repo layout I gave you)
 CMD ["npm", "start"]
-# Or, if you’re using a single-file index.js at repo root:
-# CMD ["node", "index.js"]
