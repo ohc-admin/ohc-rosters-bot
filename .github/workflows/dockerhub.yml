@@ -1,9 +1,14 @@
+# .github/workflows/dockerhub.yml
 name: Build & Push to Docker Hub
 
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch: {}  # lets you trigger it manually from the Actions tab
+  workflow_dispatch: {}  # allow manual run from Actions tab
+
+env:
+  IMAGE_NAME: ohc-rosters-bot
+  DOCKERHUB_NAMESPACE: ohctyler  # <- your Docker Hub username (lowercase)
 
 jobs:
   build:
@@ -18,12 +23,12 @@ jobs:
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}  # <- UPPERCASE
+          password: ${{ secrets.DOCKERHUB_TOKEN }}     # <- UPPERCASE
 
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: yourname/ohc-rosters-bot:latest
+          tags: docker.io/${{ env.DOCKERHUB_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
