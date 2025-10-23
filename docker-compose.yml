@@ -1,10 +1,12 @@
 version: '3.8'
 services:
   ohc-rosters-bot:
-    container_name: ohc-rosters-bot
     build: .
-    restart: always
+    container_name: ohc-rosters-bot
     env_file: .env
-    volumes:
-      - .:/app
+    restart: always
+    # For production, omit the bind mount to keep the container immutable.
+    # For local dev with hot reload, you can uncomment the next two lines:
+    # volumes:
+    #   - .:/app
     command: ["npm", "start"]
