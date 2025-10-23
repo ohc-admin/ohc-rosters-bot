@@ -1,0 +1,20 @@
+{
+  "name": "ohc-rosters-bot",
+  "version": "1.0.0",
+  "description": "Discord bot to manage and display OHC rosters with captain-scoped controls and a live board.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "register": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  },
+  "license": "MIT"
+}
