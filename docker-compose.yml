@@ -5,7 +5,8 @@ services:
     container_name: ohc-rosters-bot
     restart: always
     env_file: .env
-    # Use your host path for the DB and snapshots
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
     volumes:
-      - ./:/app
+      - /volume1/docker/ohc-rosters-bot-data:/app/data:rw
     command: ["npm", "start"]
