@@ -1,12 +1,25 @@
-version: '3.8'
+version: "3.8"
+
 services:
   ohc-rosters-bot:
     image: ohctyler/ohc-rosters-bot:latest
     container_name: ohc-rosters-bot
     restart: always
+
+    # Loads non-secret vars from .env (below)
     env_file: .env
+
+    # Inject the secret at runtime (DON'T put it in .env)
+    # Synology: set BOT_TOKEN in the Project/Container "Environment" UI
     environment:
+      # Pass BOT_TOKEN through (optional visibility)
       BOT_TOKEN: ${BOT_TOKEN}
+      # Set the actual var the app reads
+      DISCORD_TOKEN: ${BOT_TOKEN:?set_in_synology_or_shell}
+
+    # Persist the SQLite DB + WAL files to your Synology path
     volumes:
       - /volume1/docker/ohc-rosters-bot-data:/app/data:rw
+
+    # Start command (matches package.json "start")
     command: ["npm", "start"]
