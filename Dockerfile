@@ -1,17 +1,19 @@
-# Use the official Node LTS image
-FROM node:18-alpine
+# Runtime-only image (no native toolchain needed)
+FROM node:20-bullseye-slim
 
-# Create and set working directory
 WORKDIR /app
 
-# Copy dependency definitions
+# Copy manifests first for better layer caching
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --omit=dev
+# Install prod deps
+RUN npm ci --omit=dev || npm install --production
 
-# Copy source files
+# Copy the app
 COPY . .
 
-# Start the bot
+ENV NODE_ENV=production
+# If your entry is src/index.js (GitHub repo layout I gave you)
 CMD ["npm", "start"]
+# Or, if you’re using a single-file index.js at repo root:
+# CMD ["node", "index.js"]
