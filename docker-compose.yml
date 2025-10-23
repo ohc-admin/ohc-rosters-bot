@@ -1,15 +1,11 @@
 version: '3.8'
 services:
   ohc-rosters-bot:
-    image: yourname/ohc-rosters-bot:latest
-    # For local dev without pushing, you can build from source:
-    # build: .
+    image: ohctyler/ohc-rosters-bot:latest
     container_name: ohc-rosters-bot
     restart: always
     env_file: .env
+    # Use your host path for the DB and snapshots
     volumes:
-      - ohc_rosters_data:/app/data
+      - ./:/app
     command: ["npm", "start"]
-
-volumes:
-  ohc_rosters_data:
