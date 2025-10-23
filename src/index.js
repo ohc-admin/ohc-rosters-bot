@@ -1,13 +1,5 @@
 // OHC Rosters Bot — src/index.js
-// Discord.js v14 / ESM (Node >= 18)
-// Features:
-// - /rosters show [team]
-// - /rosters export
-// - /roster add | remove | setrole | replace   (Team Captain of same team OR Admin)
-// - Excludes FA (role name contains "FA" or "Free Agent")
-// - Requires "Paid Member" role for adds/setrole/replace incoming
-// - Uses Role Icon for team logo thumbnails
-// - Keeps a persistent "Roster Board" channel updated (one message per team)
+// Discord.js v14 (Node >= 20)
 
 import 'dotenv/config';
 import {
@@ -21,13 +13,15 @@ import {
   EmbedBuilder,
   AttachmentBuilder,
 } from 'discord.js';
+import { logAudit, saveRosterSnapshot } from './db.js';
 
 // =====================
 // CONFIG — EDIT THESE
 // =====================
 const CONFIG = {
   EXCLUDE_FA_MATCHERS: ['FA', 'Free Agent'],
-  // Team roles (IDs must be raw numeric strings, not <@&...> mentions)
+
+  // Team roles (raw numeric IDs; do NOT use <@&...> mention format)
   TEAM_ROLE_IDS: [
     { id: '1412728342079344651', name: 'Aura Gaming' },
     { id: '1399229255442890813', name: 'Boston Brigade' },
@@ -47,22 +41,25 @@ const CONFIG = {
     { id: '1393491792409919568', name: 'Peak Gaming' },
     { id: '1367944514622460066', name: 'Phoenix Guard' },
   ],
+
   TEAM_CAPTAIN_ROLE_NAME: 'Team Captain',
   PLAYER_ROLE_NAME: 'Player',
   COACH_ROLE_NAME: 'Coach',
   PAID_MEMBER_ROLE_ID: '1369490353396256869', // "Paid Member"
+
+  // Live board page sizing if you ever switch to grouped embeds
   PAGE_SIZE: 6,
 };
 
 // =====================
 // ENV CHECK
 // =====================
-if (!process.env.DISCORD_TOKEN || !process.env.CLIENT_ID || !process.env.GUILD_ID) {
-  console.error('Missing .env values (DISCORD_TOKEN, CLIENT_ID, GUILD_ID).');
-  process.exit(1);
+for (const key of ['DISCORD_TOKEN', 'CLIENT_ID', 'GUILD_ID']) {
+  if (!process.env[key]) {
+    console.error(`Missing .env value: ${key}`);
+    process.exit(1);
+  }
 }
-// Optional: CAPTAINS_CHANNEL_ID (gate roster mgmt)
-// Required for live board: ROSTERS_CHANNEL_ID (the channel showing rosters)
 
 // =====================
 // CLIENT
@@ -70,9 +67,9 @@ if (!process.env.DISCORD_TOKEN || !process.env.CLIENT_ID || !process.env.GUILD_I
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMembers,   // required to enumerate rosters
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.MessageContent, // used for safety checks; not strictly needed for slash cmds
   ],
   partials: [Partials.GuildMember],
 });
@@ -83,16 +80,21 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName('rosters')
-    .setDescription('Show/export team rosters (excludes FA)')
+    .setDescription('Show/export team rosters (excludes Free Agents)')
     .addSubcommand((sub) =>
       sub
         .setName('show')
-        .setDescription('Show all rosters or just one team')
+        .setDescription('Show all rosters or a single team')
         .addStringOption((opt) =>
           opt.setName('team').setDescription('Exact team name (optional)').setRequired(false)
         )
     )
-    .addSubcommand((sub) => sub.setName('export').setDescription('Export all rosters to CSV')),
+    .addSubcommand((sub) =>
+      sub
+        .setName('export')
+        .setDescription('Export all rosters to CSV')
+    ),
+
   new SlashCommandBuilder()
     .setName('roster')
     .setDescription('Manage a roster (Team Captain of that team or Admin)')
@@ -164,22 +166,30 @@ function userHasAnyRoleName(member, needles = []) {
     needles.some((n) => r.name.toLowerCase().includes(n.toLowerCase()))
   );
 }
-
-function getTeamRolesFromConfig(guild) {
-  const out = [];
-  for (const t of CONFIG.TEAM_ROLE_IDS) {
-    const role = guild.roles.cache.get(t.id);
-    if (role) out.push({ role, name: t.name ?? role.name });
-  }
-  return out;
+function excludeIfFA(member) {
+  return !userHasAnyRoleName(member, CONFIG.EXCLUDE_FA_MATCHERS);
 }
-
+function isConfiguredTeamRoleId(roleId) {
+  return CONFIG.TEAM_ROLE_IDS.some((t) => t.id === roleId);
+}
+function isPaidMember(member) {
+  const id = CONFIG.PAID_MEMBER_ROLE_ID;
+  return id ? member.roles.cache.has(id) : false;
+}
 function getCoachPlayerRoles(guild) {
   const coach = guild.roles.cache.find((r) => r.name === CONFIG.COACH_ROLE_NAME);
   const player = guild.roles.cache.find((r) => r.name === CONFIG.PLAYER_ROLE_NAME);
   return { coach, player };
 }
-
+function isCaptainOfTeam(member, teamRoleId) {
+  const isAdmin = member.permissions.has(PermissionFlagsBits.Administrator);
+  const isCaptain = member.roles.cache.some((r) => r.name === CONFIG.TEAM_CAPTAIN_ROLE_NAME);
+  const onTeam = member.roles.cache.has(teamRoleId);
+  return isAdmin || (isCaptain && onTeam);
+}
+function memberDisplay(member) {
+  return member.displayName; // Discord alias (nickname) or username fallback
+}
 function roleIconURL(role) {
   try {
     return role.iconURL?.({ size: 256 }) || null;
@@ -187,29 +197,13 @@ function roleIconURL(role) {
     return null;
   }
 }
-
-function memberDisplay(member) {
-  return member.displayName; // nickname alias; fallback handled by discord.js
-}
-
-function excludeIfFA(member) {
-  return !userHasAnyRoleName(member, CONFIG.EXCLUDE_FA_MATCHERS);
-}
-
-function isPaidMember(member) {
-  const id = CONFIG.PAID_MEMBER_ROLE_ID;
-  return id ? member.roles.cache.has(id) : false;
-}
-
-function isConfiguredTeamRoleId(roleId) {
-  return CONFIG.TEAM_ROLE_IDS.some((t) => t.id === roleId);
-}
-
-function isCaptainOfTeam(member, teamRoleId) {
-  const isAdmin = member.permissions.has(PermissionFlagsBits.Administrator);
-  const isCaptain = member.roles.cache.some((r) => r.name === CONFIG.TEAM_CAPTAIN_ROLE_NAME);
-  const onTeam = member.roles.cache.has(teamRoleId);
-  return isAdmin || (isCaptain && onTeam);
+function getTeamRolesFromConfig(guild) {
+  const out = [];
+  for (const t of CONFIG.TEAM_ROLE_IDS) {
+    const role = guild.roles.cache.get(t.id);
+    if (role) out.push({ role, name: t.name ?? role.name });
+  }
+  return out;
 }
 
 // =====================
@@ -252,7 +246,6 @@ async function buildRosterEmbeds(guild, targetTeamName = null) {
       });
       embed.setDescription(lines.join('\n').slice(0, 4096));
     }
-
     embeds.push(embed);
   }
   return embeds;
@@ -261,6 +254,26 @@ async function buildRosterEmbeds(guild, targetTeamName = null) {
 // =====================
 // LIVE ROSTERS BOARD
 // =====================
+async function snapshotTeam(guild, role) {
+  const { coach, player } = getCoachPlayerRoles(guild);
+  const members = guild.members.cache
+    .filter((m) => m.roles.cache.has(role.id))
+    .filter((m) => excludeIfFA(m))
+    .sort((a, b) => memberDisplay(a).localeCompare(memberDisplay(b)));
+
+  const payload = {
+    teamName: role.name,
+    teamRoleId: role.id,
+    members: members.map((m) => ({
+      id: m.id,
+      name: memberDisplay(m),
+      isCoach: coach ? m.roles.cache.has(coach.id) : false,
+      isPlayer: player ? m.roles.cache.has(player.id) : false,
+    })),
+  };
+  saveRosterSnapshot(role.id, payload);
+}
+
 async function syncRostersBoard(guild) {
   const channelId = process.env.ROSTERS_CHANNEL_ID;
   if (!channelId) return;
@@ -270,7 +283,7 @@ async function syncRostersBoard(guild) {
 
   await guild.members.fetch();
 
-  // Map existing board messages by footer teamRoleId:####
+  // Map existing board messages by footer marker teamRoleId:####
   const existing = await channel.messages.fetch({ limit: 100 });
   const byTeamId = new Map();
   for (const msg of existing.values()) {
@@ -280,17 +293,22 @@ async function syncRostersBoard(guild) {
     if (m) byTeamId.set(m[1], msg);
   }
 
-  // Upsert: one message per configured team
+  // Upsert one message per configured team
   for (const t of CONFIG.TEAM_ROLE_IDS) {
     const role = guild.roles.cache.get(t.id);
     if (!role) continue;
+
     const [embed] = await buildRosterEmbeds(guild, t.name);
     const current = byTeamId.get(t.id);
+
     if (current) {
       await current.edit({ embeds: [embed] });
     } else {
       await channel.send({ embeds: [embed] });
     }
+
+    // Save latest snapshot for this team
+    await snapshotTeam(guild, role);
   }
 }
 
@@ -313,7 +331,7 @@ client.on('interactionCreate', async (interaction) => {
       for (let i = 1; i < embeds.length; i++) {
         await interaction.followUp({ embeds: [embeds[i]] });
       }
-      // Optional: keep the live board fresh whenever someone checks rosters
+      // Keep the board fresh
       await syncRostersBoard(interaction.guild).catch(() => {});
       return;
     }
@@ -340,40 +358,42 @@ client.on('interactionCreate', async (interaction) => {
           rows.push([t.name, memberDisplay(m), m.id, tags.join(' / ')]);
         }
       }
+
       const csv = [header, ...rows]
         .map((r) => r.map((x) => `"${String(x).replaceAll('"', '""')}"`).join(','))
         .join('\n');
+
       const file = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: 'ohc_rosters.csv' });
       await interaction.editReply({ content: 'Exported current rosters:', files: [file] });
+
+      logAudit({ actorId: interaction.user.id, action: 'export', notes: `rows=${rows.length}` });
       return;
     }
 
-    // /roster (add/remove/setrole/replace)
+    // /roster (mutations)
     if (interaction.commandName === 'roster') {
-      const member = await interaction.guild.members.fetch(interaction.user.id);
+      const actorMember = await interaction.guild.members.fetch(interaction.user.id);
 
-      // Optional channel gate
+      // Channel gate for roster changes
       if (process.env.CAPTAINS_CHANNEL_ID && interaction.channelId !== process.env.CAPTAINS_CHANNEL_ID) {
         await interaction.reply({
-          content: 'Please use the designated captains channel for roster changes.',
+          content: 'Please use the designated roster-updates channel for roster changes.',
           ephemeral: true,
         });
         return;
       }
 
       const sub = interaction.options.getSubcommand();
-      const target = interaction.options.getUser('user'); // may be null for "replace"
       const teamRole = interaction.options.getRole('teamrole');
-      const as = interaction.options.getString('as');
+      const as = interaction.options.getString('as'); // player|coach|null
+      const { coach, player } = getCoachPlayerRoles(interaction.guild);
 
-      // Validate the team role is one of the configured teams
       if (!isConfiguredTeamRoleId(teamRole.id)) {
         await interaction.reply({ content: 'That team role is not configured in the bot.', ephemeral: true });
         return;
       }
 
-      // Captain permission scoped to their own team
-      if (!isCaptainOfTeam(member, teamRole.id)) {
+      if (!isCaptainOfTeam(actorMember, teamRole.id)) {
         await interaction.reply({
           content: 'Only Team Captains of this team (or Admins) can modify this roster.',
           ephemeral: true,
@@ -381,20 +401,17 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      const { coach, player } = getCoachPlayerRoles(interaction.guild);
-
+      // ADD
       if (sub === 'add') {
-        const targetMember = await interaction.guild.members.fetch(target.id);
+        const targetUser = interaction.options.getUser('user');
+        const targetMember = await interaction.guild.members.fetch(targetUser.id);
 
         if (!isPaidMember(targetMember)) {
-          await interaction.reply({
-            content: 'This user is not a Paid Member and cannot be added to a roster.',
-            ephemeral: true,
-          });
+          await interaction.reply({ content: 'This user is not a Paid Member and cannot be added to a roster.', ephemeral: true });
           return;
         }
 
-        // Remove any other configured team roles to prevent dual-roster
+        // Remove other configured team roles (avoid dual-roster)
         const configuredTeamIds = new Set(CONFIG.TEAM_ROLE_IDS.map((t) => t.id));
         const toRemove = targetMember.roles.cache.filter((r) => configuredTeamIds.has(r.id) && r.id !== teamRole.id);
         if (toRemove.size > 0) await targetMember.roles.remove(toRemove);
@@ -404,18 +421,19 @@ client.on('interactionCreate', async (interaction) => {
         if (as === 'coach' && coach) await targetMember.roles.add(coach);
 
         await interaction.reply({
-          content: `Added **${memberDisplay(targetMember)}** to **${teamRole.name}**${
-            as ? ` as **${as === 'player' ? 'Player' : 'Coach'}**` : ''
-          }.`,
+          content: `Added **${memberDisplay(targetMember)}** to **${teamRole.name}**${as ? ` as **${as === 'player' ? 'Player' : 'Coach'}**` : ''}.`,
           ephemeral: true,
         });
 
+        logAudit({ actorId: interaction.user.id, action: 'add', teamRoleId: teamRole.id, targetId: targetMember.id, asTag: as || null });
         await syncRostersBoard(interaction.guild).catch(() => {});
         return;
       }
 
+      // REMOVE
       if (sub === 'remove') {
-        const targetMember = await interaction.guild.members.fetch(target.id);
+        const targetUser = interaction.options.getUser('user');
+        const targetMember = await interaction.guild.members.fetch(targetUser.id);
 
         await targetMember.roles.remove(teamRole);
         if (player && targetMember.roles.cache.has(player.id)) await targetMember.roles.remove(player);
@@ -426,32 +444,26 @@ client.on('interactionCreate', async (interaction) => {
           ephemeral: true,
         });
 
+        logAudit({ actorId: interaction.user.id, action: 'remove', teamRoleId: teamRole.id, targetId: targetMember.id });
         await syncRostersBoard(interaction.guild).catch(() => {});
         return;
       }
 
+      // SETROLE
       if (sub === 'setrole') {
-        const targetMember = await interaction.guild.members.fetch(target.id);
+        const targetUser = interaction.options.getUser('user');
+        const targetMember = await interaction.guild.members.fetch(targetUser.id);
 
         if (!isPaidMember(targetMember)) {
-          await interaction.reply({
-            content: 'Only Paid Members can be marked as Player or Coach.',
-            ephemeral: true,
-          });
+          await interaction.reply({ content: 'Only Paid Members can be marked as Player or Coach.', ephemeral: true });
           return;
         }
         if (!player || !coach) {
-          await interaction.reply({
-            content: 'Player/Coach roles are not configured on the server.',
-            ephemeral: true,
-          });
+          await interaction.reply({ content: 'Player/Coach roles are not configured on the server.', ephemeral: true });
           return;
         }
         if (!targetMember.roles.cache.has(teamRole.id)) {
-          await interaction.reply({
-            content: `${memberDisplay(targetMember)} is not on **${teamRole.name}**. Use /roster add first.`,
-            ephemeral: true,
-          });
+          await interaction.reply({ content: `${memberDisplay(targetMember)} is not on **${teamRole.name}**. Use /roster add first.`, ephemeral: true });
           return;
         }
 
@@ -464,16 +476,16 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         await interaction.reply({
-          content: `Set **${memberDisplay(targetMember)}** as **${as === 'player' ? 'Player' : 'Coach'}** for **${
-            teamRole.name
-          }**.`,
+          content: `Set **${memberDisplay(targetMember)}** as **${as === 'player' ? 'Player' : 'Coach'}** for **${teamRole.name}**.`,
           ephemeral: true,
         });
 
+        logAudit({ actorId: interaction.user.id, action: 'setrole', teamRoleId: teamRole.id, targetId: targetMember.id, asTag: as });
         await syncRostersBoard(interaction.guild).catch(() => {});
         return;
       }
 
+      // REPLACE
       if (sub === 'replace') {
         const outUser = interaction.options.getUser('out');
         const inUser = interaction.options.getUser('in');
@@ -481,26 +493,21 @@ client.on('interactionCreate', async (interaction) => {
         const inMember = await interaction.guild.members.fetch(inUser.id);
 
         if (!outMember.roles.cache.has(teamRole.id)) {
-          await interaction.reply({
-            content: `${memberDisplay(outMember)} is not on **${teamRole.name}**.`,
-            ephemeral: true,
-          });
+          await interaction.reply({ content: `${memberDisplay(outMember)} is not on **${teamRole.name}**.`, ephemeral: true });
           return;
         }
         if (!isPaidMember(inMember)) {
-          await interaction.reply({
-            content: 'Incoming member is not a Paid Member and cannot be added.',
-            ephemeral: true,
-          });
+          await interaction.reply({ content: 'Incoming member is not a Paid Member and cannot be added.', ephemeral: true });
           return;
         }
 
-        // Remove outgoing from team + clean tags
+        // Remove OUT
         await outMember.roles.remove(teamRole);
+        const { coach, player } = getCoachPlayerRoles(interaction.guild);
         if (player && outMember.roles.cache.has(player.id)) await outMember.roles.remove(player);
         if (coach && outMember.roles.cache.has(coach.id)) await outMember.roles.remove(coach);
 
-        // Ensure incoming not on other configured team
+        // Remove other configured team roles from IN, then add
         const configuredTeamIds = new Set(CONFIG.TEAM_ROLE_IDS.map((t) => t.id));
         const toRemove = inMember.roles.cache.filter((r) => configuredTeamIds.has(r.id) && r.id !== teamRole.id);
         if (toRemove.size > 0) await inMember.roles.remove(toRemove);
@@ -510,10 +517,17 @@ client.on('interactionCreate', async (interaction) => {
         if (as === 'coach' && coach) await inMember.roles.add(coach);
 
         await interaction.reply({
-          content: `Replaced **${memberDisplay(outMember)}** with **${memberDisplay(inMember)}** on **${
-            teamRole.name
-          }**${as ? ` (new member set as **${as === 'player' ? 'Player' : 'Coach'}**)` : ''}.`,
+          content: `Replaced **${memberDisplay(outMember)}** with **${memberDisplay(inMember)}** on **${teamRole.name}**${as ? ` (new member set as **${as === 'player' ? 'Player' : 'Coach'}**)` : ''}.`,
           ephemeral: true,
+        });
+
+        logAudit({
+          actorId: interaction.user.id,
+          action: 'replace',
+          teamRoleId: teamRole.id,
+          targetId: outMember.id,
+          otherId: inMember.id,
+          asTag: as || null
         });
 
         await syncRostersBoard(interaction.guild).catch(() => {});
@@ -524,10 +538,7 @@ client.on('interactionCreate', async (interaction) => {
     console.error(err);
     if (interaction.isRepliable()) {
       try {
-        await interaction.reply({
-          content: 'Something went wrong. Check bot permissions and role IDs.',
-          ephemeral: true,
-        });
+        await interaction.reply({ content: 'Something went wrong. Check bot permissions and role IDs.', ephemeral: true });
       } catch {}
     }
   }
@@ -542,7 +553,6 @@ client.once('ready', async () => {
     const guild = await client.guilds.fetch(process.env.GUILD_ID);
     await guild.roles.fetch();
     await registerCommands();
-    // Build the live board once on startup
     await syncRostersBoard(guild).catch(() => {});
     console.log('✓ Ready');
   } catch (e) {
