@@ -47,7 +47,6 @@ const CONFIG = {
   COACH_ROLE_NAME: 'Coach',
   PAID_MEMBER_ROLE_ID: '1369490353396256869', // "Paid Member"
 
-  // Live board page sizing if you ever switch to grouped embeds
   PAGE_SIZE: 6,
 };
 
@@ -69,7 +68,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,   // required to enumerate rosters
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // used for safety checks; not strictly needed for slash cmds
+    GatewayIntentBits.MessageContent, // not strictly needed for slash cmds
   ],
   partials: [Partials.GuildMember],
 });
@@ -188,7 +187,7 @@ function isCaptainOfTeam(member, teamRoleId) {
   return isAdmin || (isCaptain && onTeam);
 }
 function memberDisplay(member) {
-  return member.displayName; // Discord alias (nickname) or username fallback
+  return member.displayName;
 }
 function roleIconURL(role) {
   try {
@@ -284,7 +283,13 @@ async function syncRostersBoard(guild) {
   await guild.members.fetch();
 
   // Map existing board messages by footer marker teamRoleId:####
-  const existing = await channel.messages.fetch({ limit: 100 });
+  let existing;
+  try {
+    existing = await channel.messages.fetch({ limit: 100 });
+  } catch (e) {
+    console.warn(`[rosters-board] Could not fetch existing messages in #${channel.name}:`, e?.message || e);
+    existing = new Map(); // proceed as if empty
+  }
   const byTeamId = new Map();
   for (const msg of existing.values()) {
     const emb = msg.embeds?.[0];
@@ -324,7 +329,11 @@ client.on('interactionCreate', async (interaction) => {
       const team = interaction.options.getString('team');
       const embeds = await buildRosterEmbeds(interaction.guild, team);
       if (embeds.length === 0) {
-        await interaction.reply({ content: 'No team roles are configured in the bot yet.', ephemeral: true });
+        if (team) {
+          await interaction.reply({ content: `Team **${team}** was not found in the configured team list.`, ephemeral: true });
+        } else {
+          await interaction.reply({ content: 'No team roles are configured in the bot yet.', ephemeral: true });
+        }
         return;
       }
       await interaction.reply({ embeds: [embeds[0]] });
@@ -503,7 +512,6 @@ client.on('interactionCreate', async (interaction) => {
 
         // Remove OUT
         await outMember.roles.remove(teamRole);
-        const { coach, player } = getCoachPlayerRoles(interaction.guild);
         if (player && outMember.roles.cache.has(player.id)) await outMember.roles.remove(player);
         if (coach && outMember.roles.cache.has(coach.id)) await outMember.roles.remove(coach);
 
@@ -550,6 +558,8 @@ client.on('interactionCreate', async (interaction) => {
 client.once('ready', async () => {
   console.log(`✓ Logged in as ${client.user.tag}`);
   try {
+    client.user.setPresence({ activities: [{ name: '/rosters show' }], status: 'online' });
+
     const guild = await client.guilds.fetch(process.env.GUILD_ID);
     await guild.roles.fetch();
     await registerCommands();
@@ -559,5 +569,16 @@ client.once('ready', async () => {
     console.error('Startup error:', e);
   }
 });
+
+// ==============
+// TOKEN DEBUG (one-time helper; safe to remove later)
+// ==============
+function explainToken(t) {
+  if (!t) return 'EMPTY';
+  const parts = String(t).split('.');
+  const lens = parts.map(p => p.length).join('-');
+  return `len=${String(t).length} parts=${parts.length} partsLen=${lens}`;
+}
+console.log('[DEBUG] DISCORD_TOKEN:', explainToken(process.env.DISCORD_TOKEN));
 
 client.login(process.env.DISCORD_TOKEN);
