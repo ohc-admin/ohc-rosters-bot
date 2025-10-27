@@ -45,7 +45,7 @@ const CONFIG = {
   TEAM_CAPTAIN_ROLE_NAME: 'Team Captain',
   PLAYER_ROLE_NAME: 'Player',
   COACH_ROLE_NAME: 'Coach',
-  PAID_MEMBER_ROLE_ID: '1369490353396256869', // "Paid Member"
+  PREMIUM_MEMBER_ROLE_ID: '1430337942341156876', // "Premium Members"
 
   PAGE_SIZE: 6,
 };
@@ -67,8 +67,6 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,   // required to enumerate rosters
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // not strictly needed for slash cmds
   ],
   partials: [Partials.GuildMember],
 });
@@ -148,13 +146,28 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
 ].map((c) => c.toJSON());
 
+// Strong registration logs (BEFORE/AFTER) to diagnose visibility
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-  await rest.put(
-    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-    { body: commands }
-  );
-  console.log('✓ Slash commands registered');
+  const appId = process.env.CLIENT_ID;
+  const guildId = process.env.GUILD_ID;
+
+  try {
+    const before = await rest.get(Routes.applicationGuildCommands(appId, guildId));
+    console.log(`[REG] Commands BEFORE (${before.length}):`, before.map(c => c.name).join(', ') || '(none)');
+
+    const putRes = await rest.put(
+      Routes.applicationGuildCommands(appId, guildId),
+      { body: commands }
+    );
+    console.log(`[REG] Upserted ${Array.isArray(putRes) ? putRes.length : 0} commands.`);
+
+    const after = await rest.get(Routes.applicationGuildCommands(appId, guildId));
+    console.log(`[REG] Commands AFTER (${after.length}):`, after.map(c => c.name).join(', ') || '(none)');
+  } catch (err) {
+    console.error('[REG] Failed to register commands.');
+    console.error(err?.rawError ?? err?.response?.data ?? err);
+  }
 }
 
 // =====================
@@ -172,7 +185,7 @@ function isConfiguredTeamRoleId(roleId) {
   return CONFIG.TEAM_ROLE_IDS.some((t) => t.id === roleId);
 }
 function isPaidMember(member) {
-  const id = CONFIG.PAID_MEMBER_ROLE_ID;
+  const id = CONFIG.PREMIUM_MEMBER_ROLE_ID;
   return id ? member.roles.cache.has(id) : false;
 }
 function getCoachPlayerRoles(guild) {
@@ -416,7 +429,7 @@ client.on('interactionCreate', async (interaction) => {
         const targetMember = await interaction.guild.members.fetch(targetUser.id);
 
         if (!isPaidMember(targetMember)) {
-          await interaction.reply({ content: 'This user is not a Paid Member and cannot be added to a roster.', ephemeral: true });
+          await interaction.reply({ content: 'This user is not a Premium Member and cannot be added to a roster.', ephemeral: true });
           return;
         }
 
@@ -464,7 +477,7 @@ client.on('interactionCreate', async (interaction) => {
         const targetMember = await interaction.guild.members.fetch(targetUser.id);
 
         if (!isPaidMember(targetMember)) {
-          await interaction.reply({ content: 'Only Paid Members can be marked as Player or Coach.', ephemeral: true });
+          await interaction.reply({ content: 'Only Premium Members can be marked as Player or Coach.', ephemeral: true });
           return;
         }
         if (!player || !coach) {
@@ -506,7 +519,7 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         if (!isPaidMember(inMember)) {
-          await interaction.reply({ content: 'Incoming member is not a Paid Member and cannot be added.', ephemeral: true });
+          await interaction.reply({ content: 'Incoming member is not a Premium Member and cannot be added.', ephemeral: true });
           return;
         }
 
@@ -563,6 +576,12 @@ client.once('ready', async () => {
     const guild = await client.guilds.fetch(process.env.GUILD_ID);
     await guild.roles.fetch();
     await registerCommands();
+
+    // Verify visible command list
+    const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
+    const list = await rest.get(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID));
+    console.log(`[REG] Visible in guild now (${list.length}):`, list.map(c => `${c.name}${c.default_member_permissions ? ' [restricted]' : ''}`).join(', ') || '(none)'));
+
     await syncRostersBoard(guild).catch(() => {});
     console.log('✓ Ready');
   } catch (e) {
